@@ -13,10 +13,17 @@
 // limitations under the License.
 
 import assert from 'node:assert'
-import { spawn, spawnSync, StdioNull, StdioPipe } from 'node:child_process'
-import { AsyncHook, AsyncLocalStorage, createHook } from 'node:async_hooks'
-import { Readable, Writable } from 'node:stream'
+import {
+  type StdioOptions,
+  type IOType,
+  spawn,
+  spawnSync,
+} from 'node:child_process'
+import { type Encoding } from 'node:crypto'
+import { type AsyncHook, AsyncLocalStorage, createHook } from 'node:async_hooks'
+import { type Readable, type Writable } from 'node:stream'
 import { inspect } from 'node:util'
+import { EOL } from 'node:os'
 import {
   exec,
   buildCmd,
@@ -24,21 +31,21 @@ import {
   which,
   ps,
   type ChalkInstance,
-  RequestInfo,
-  RequestInit,
-} from './vendor.js'
+  type RequestInfo,
+  type RequestInit,
+  type TSpawnStore,
+} from './vendor-core.js'
 import {
-  Duration,
+  type Duration,
   errnoMessage,
   exitCodeInfo,
   formatCmd,
   getCallerLocation,
   noop,
-  normalizeMultilinePieces,
   parseDuration,
   quote,
   quotePowerShell,
-  noquote,
+  preferNmBin,
 } from './util.js'
 
 export interface Shell {
@@ -52,13 +59,18 @@ export interface Shell {
 
 const processCwd = Symbol('processCwd')
 const syncExec = Symbol('syncExec')
+const eol = Buffer.from(EOL)
 
 export interface Options {
   [processCwd]: string
   [syncExec]: boolean
   cwd?: string
   ac?: AbortController
+  signal?: AbortSignal
   input?: string | Buffer | Readable | ProcessOutput | ProcessPromise
+  timeout?: Duration
+  timeoutSignal?: string
+  stdio: StdioOptions
   verbose: boolean
   sync: boolean
   env: NodeJS.ProcessEnv
@@ -66,24 +78,30 @@ export interface Options {
   nothrow: boolean
   prefix: string
   postfix: string
-  quote: typeof quote
+  quote?: typeof quote
   quiet: boolean
+  detached: boolean
+  preferLocal: boolean
   spawn: typeof spawn
   spawnSync: typeof spawnSync
+  store?: TSpawnStore
   log: typeof log
   kill: typeof kill
 }
 
 const storage = new AsyncLocalStorage<Options>()
-const cwdSyncHook: AsyncHook & { enabled?: boolean } = createHook({
-  init: syncCwd,
-  before: syncCwd,
-  promiseResolve: syncCwd,
-  after: syncCwd,
-  destroy: syncCwd,
-})
+let cwdSyncHook: AsyncHook
 
 export function syncProcessCwd(flag: boolean = true) {
+  cwdSyncHook =
+    cwdSyncHook ||
+    createHook({
+      init: syncCwd,
+      before: syncCwd,
+      promiseResolve: syncCwd,
+      after: syncCwd,
+      destroy: syncCwd,
+    })
   if (flag) cwdSyncHook.enable()
   else cwdSyncHook.disable()
 }
@@ -95,17 +113,18 @@ export const defaults: Options = {
   env: process.env,
   sync: false,
   shell: true,
+  stdio: ['inherit', 'pipe', 'pipe'],
   nothrow: false,
   quiet: false,
   prefix: '',
   postfix: '',
-  quote: noquote,
+  detached: false,
+  preferLocal: false,
   spawn,
   spawnSync,
   log,
   kill,
 }
-const isWin = process.platform == 'win32'
 
 export function usePowerShell() {
   $.shell = which.sync('powershell.exe')
@@ -114,16 +133,28 @@ export function usePowerShell() {
   $.quote = quotePowerShell
 }
 
+export function usePwsh() {
+  $.shell = which.sync('pwsh')
+  $.prefix = ''
+  $.postfix = '; exit $LastExitCode'
+  $.quote = quotePowerShell
+}
+
 export function useBash() {
   $.shell = which.sync('bash')
   $.prefix = 'set -euo pipefail;'
+  $.postfix = ''
   $.quote = quote
 }
 
 function checkShell() {
-  if (!$.shell) {
-    throw new Error(`shell is not available: setup guide goes here`)
-  }
+  if (!$.shell)
+    throw new Error(`No shell is available: https://ï.at/zx-no-shell`)
+}
+
+function checkQuote() {
+  if (!$.quote)
+    throw new Error('No quote function is defined: https://ï.at/no-quote-func')
 }
 
 function getStore() {
@@ -132,8 +163,6 @@ function getStore() {
 
 export const $: Shell & Options = new Proxy<Shell & Options>(
   function (pieces, ...args) {
-    checkShell()
-
     if (!Array.isArray(pieces)) {
       return function (this: any, ...args: any) {
         const self = this
@@ -146,16 +175,19 @@ export const $: Shell & Options = new Proxy<Shell & Options>(
     if (pieces.some((p) => p == undefined)) {
       throw new Error(`Malformed command at ${from}`)
     }
+    checkShell()
+    checkQuote()
+
     let resolve: Resolve, reject: Resolve
     const promise = new ProcessPromise((...args) => ([resolve, reject] = args))
     const cmd = buildCmd(
-      $.quote,
-      normalizeMultilinePieces(pieces as TemplateStringsArray),
+      $.quote as typeof quote,
+      pieces as TemplateStringsArray,
       args
     ) as string
     const snapshot = getStore()
     const sync = snapshot[syncExec]
-    const callback = () => promise.isHalted || promise.run()
+    const callback = () => promise.isHalted() || promise.run()
 
     promise._bind(
       cmd,
@@ -192,7 +224,6 @@ try {
 } catch (err) {}
 
 type Resolve = (out: ProcessOutput) => void
-type IO = StdioPipe | StdioNull
 
 export class ProcessPromise extends Promise<ProcessOutput> {
   private _command = ''
@@ -200,9 +231,10 @@ export class ProcessPromise extends Promise<ProcessOutput> {
   private _resolve: Resolve = noop
   private _reject: Resolve = noop
   private _snapshot = getStore()
-  private _stdio: [IO, IO, IO] = ['inherit', 'pipe', 'pipe']
+  private _stdio?: StdioOptions
   private _nothrow?: boolean
   private _quiet?: boolean
+  private _verbose?: boolean
   private _timeout?: number
   private _timeoutSignal = 'SIGTERM'
   private _resolved = false
@@ -224,7 +256,7 @@ export class ProcessPromise extends Promise<ProcessOutput> {
     this._from = from
     this._resolve = resolve
     this._reject = reject
-    this._snapshot = { ...options }
+    this._snapshot = { ac: new AbortController(), ...options }
   }
 
   run(): ProcessPromise {
@@ -236,6 +268,8 @@ export class ProcessPromise extends Promise<ProcessOutput> {
     const input = ($.input as ProcessPromise | ProcessOutput)?.stdout ?? $.input
 
     if (input) this.stdio('pipe')
+    if ($.timeout) this.timeout($.timeout, $.timeoutSignal)
+    if ($.preferLocal) $.env = preferNmBin($.env, $.cwd, $[processCwd])
 
     $.log({
       kind: 'cmd',
@@ -245,16 +279,18 @@ export class ProcessPromise extends Promise<ProcessOutput> {
 
     this._zurk = exec({
       input,
-      cmd: $.prefix + this._command + $.postfix,
+      cmd: $.prefix + self._command + $.postfix,
       cwd: $.cwd ?? $[processCwd],
       ac: $.ac,
+      signal: $.signal,
       shell: typeof $.shell === 'string' ? $.shell : true,
       env: $.env,
       spawn: $.spawn,
       spawnSync: $.spawnSync,
-      stdio: this._stdio as any,
+      store: $.store,
+      stdio: self._stdio ?? $.stdio,
       sync: $[syncExec],
-      detached: !isWin,
+      detached: $.detached,
       run: (cb) => cb(),
       on: {
         start: () => {
@@ -275,8 +311,12 @@ export class ProcessPromise extends Promise<ProcessOutput> {
           // Stderr should be printed regardless of piping.
           $.log({ kind: 'stderr', data, verbose: !self.isQuiet() })
         },
-        end: ({ error, stdout, stderr, stdall, status, signal }) => {
+        end: ({ error, stdout, stderr, stdall, status, signal }, c) => {
           self._resolved = true
+
+          // Ensures EOL
+          if (stderr && !stderr.endsWith('\n')) c.on.stderr?.(eol, c)
+          if (stdout && !stdout.endsWith('\n')) c.on.stdout?.(eol, c)
 
           if (error) {
             const message = ProcessOutput.getErrorMessage(error, self._from)
@@ -308,7 +348,7 @@ export class ProcessPromise extends Promise<ProcessOutput> {
               message
             )
             self._output = output
-            if (status === 0 || (self._nothrow ?? $.nothrow)) {
+            if (status === 0 || self.isNothrow()) {
               self._resolve(output)
             } else {
               self._reject(output)
@@ -359,6 +399,26 @@ export class ProcessPromise extends Promise<ProcessOutput> {
     )
   }
 
+  json<T = any>(): Promise<T> {
+    return this.then((p) => p.json<T>())
+  }
+
+  text(encoding?: Encoding): Promise<string> {
+    return this.then((p) => p.text(encoding))
+  }
+
+  lines(): Promise<string[]> {
+    return this.then((p) => p.lines())
+  }
+
+  buffer(): Promise<Buffer> {
+    return this.then((p) => p.buffer())
+  }
+
+  blob(type?: string): Promise<Blob> {
+    return this.then((p) => p.blob(type))
+  }
+
   then<R = ProcessOutput, E = ProcessOutput>(
     onfulfilled?:
       | ((value: ProcessOutput) => PromiseLike<R> | R)
@@ -369,7 +429,7 @@ export class ProcessPromise extends Promise<ProcessOutput> {
       | undefined
       | null
   ): Promise<R | E> {
-    if (this.isHalted && !this.child) {
+    if (this.isHalted() && !this.child) {
       throw new Error('The process is halted!')
     }
     return super.then(onfulfilled, onrejected)
@@ -385,7 +445,7 @@ export class ProcessPromise extends Promise<ProcessOutput> {
   }
 
   pipe(dest: Writable | ProcessPromise): ProcessPromise {
-    if (typeof dest == 'string')
+    if (typeof dest === 'string')
       throw new Error('The pipe() method does not take strings. Forgot $?')
     if (this._resolved) {
       if (dest instanceof ProcessPromise) dest.stdin.end() // In case of piped stdin, we may want to close stdin of dest as well.
@@ -412,10 +472,17 @@ export class ProcessPromise extends Promise<ProcessOutput> {
   }
 
   abort(reason?: string) {
+    if (this.signal !== this._snapshot.ac?.signal)
+      throw new Error('The signal is controlled by another process.')
+
     if (!this.child)
       throw new Error('Trying to abort a process without creating one.')
 
     this._zurk?.ac.abort(reason)
+  }
+
+  get signal() {
+    return this._snapshot.signal || this._snapshot.ac?.signal
   }
 
   async kill(signal = 'SIGTERM'): Promise<void> {
@@ -426,7 +493,11 @@ export class ProcessPromise extends Promise<ProcessOutput> {
     return $.kill(this.child.pid, signal)
   }
 
-  stdio(stdin: IO, stdout: IO = 'pipe', stderr: IO = 'pipe'): ProcessPromise {
+  stdio(
+    stdin: IOType,
+    stdout: IOType = 'pipe',
+    stderr: IOType = 'pipe'
+  ): ProcessPromise {
     this._stdio = [stdin, stdout, stderr]
     return this
   }
@@ -436,8 +507,13 @@ export class ProcessPromise extends Promise<ProcessOutput> {
     return this
   }
 
-  quiet(): ProcessPromise {
-    this._quiet = true
+  quiet(v = true): ProcessPromise {
+    this._quiet = v
+    return this
+  }
+
+  verbose(v = true): ProcessPromise {
+    this._verbose = v
     return this
   }
 
@@ -446,7 +522,11 @@ export class ProcessPromise extends Promise<ProcessOutput> {
   }
 
   isVerbose(): boolean {
-    return this._snapshot.verbose && !this.isQuiet()
+    return (this._verbose ?? this._snapshot.verbose) && !this.isQuiet()
+  }
+
+  isNothrow(): boolean {
+    return this._nothrow ?? this._snapshot.nothrow
   }
 
   timeout(d: Duration, signal = 'SIGTERM'): ProcessPromise {
@@ -460,7 +540,7 @@ export class ProcessPromise extends Promise<ProcessOutput> {
     return this
   }
 
-  get isHalted(): boolean {
+  isHalted(): boolean {
     return this._halted
   }
 
@@ -494,6 +574,32 @@ export class ProcessOutput extends Error {
 
   toString() {
     return this._combined
+  }
+
+  json<T = any>(): T {
+    return JSON.parse(this._combined)
+  }
+
+  buffer() {
+    return Buffer.from(this._combined)
+  }
+
+  blob(type = 'text/plain') {
+    if (!globalThis.Blob)
+      throw new Error(
+        'Blob is not supported in this environment. Provide a polyfill'
+      )
+    return new Blob([this.buffer()], { type })
+  }
+
+  text(encoding: Encoding = 'utf8') {
+    return encoding === 'utf8'
+      ? this.toString()
+      : this.buffer().toString(encoding)
+  }
+
+  lines() {
+    return this.valueOf().split(/\r?\n/)
   }
 
   valueOf() {
@@ -588,18 +694,22 @@ export async function kill(pid: number, signal?: string) {
   }
   try {
     process.kill(-pid, signal)
-  } catch (e) {}
+  } catch (e) {
+    try {
+      process.kill(+pid, signal)
+    } catch (e) {}
+  }
 }
 
-export type LogEntry =
+export type LogEntry = {
+  verbose?: boolean
+} & (
   | {
       kind: 'cmd'
-      verbose: boolean
       cmd: string
     }
   | {
       kind: 'stdout' | 'stderr'
-      verbose: boolean
       data: Buffer
     }
   | {
@@ -619,31 +729,29 @@ export type LogEntry =
       kind: 'custom'
       data: any
     }
+)
 
 export function log(entry: LogEntry) {
+  if (!(entry.verbose ?? $.verbose)) return
   switch (entry.kind) {
     case 'cmd':
-      if (!entry.verbose) return
       process.stderr.write(formatCmd(entry.cmd))
       break
     case 'stdout':
     case 'stderr':
-      if (!entry.verbose) return
+    case 'custom':
       process.stderr.write(entry.data)
       break
     case 'cd':
-      if (!$.verbose) return
       process.stderr.write('$ ' + chalk.greenBright('cd') + ` ${entry.dir}\n`)
       break
     case 'fetch':
-      if (!$.verbose) return
       const init = entry.init ? ' ' + inspect(entry.init) : ''
       process.stderr.write(
         '$ ' + chalk.greenBright('fetch') + ` ${entry.url}${init}\n`
       )
       break
     case 'retry':
-      if (!$.verbose) return
       process.stderr.write(entry.error + '\n')
   }
 }

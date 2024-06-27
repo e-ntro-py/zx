@@ -14,8 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { createRequire } from 'node:module'
-import { basename, dirname, extname, join, resolve } from 'node:path'
 import url from 'node:url'
 import {
   $,
@@ -25,11 +23,23 @@ import {
   chalk,
   minimist,
   fs,
+  path,
 } from './index.js'
-import { randomId } from './util.js'
 import { installDeps, parseDeps } from './deps.js'
+import { randomId } from './util.js'
+import { createRequire } from './vendor.js'
 
-function printUsage() {
+isMain() &&
+  main().catch((err) => {
+    if (err instanceof ProcessOutput) {
+      console.error('Error:', err.message)
+    } else {
+      console.error(err)
+    }
+    process.exitCode = 1
+  })
+
+export function printUsage() {
   // language=txt
   console.log(`
  ${chalk.bold('zx ' + getVersion())}
@@ -39,30 +49,43 @@ function printUsage() {
    zx [options] <script>
 
  ${chalk.bold('Options')}
-   --quiet              don't echo commands
+   --quiet              suppress any outputs
+   --verbose            enable verbose mode
    --shell=<path>       custom shell binary
    --prefix=<command>   prefix all commands
    --postfix=<command>  postfix all commands
+   --cwd=<path>         set current directory
    --eval=<js>, -e      evaluate script 
    --install, -i        install dependencies
    --version, -v        print current zx version
    --help, -h           print help
    --repl               start repl
+   --experimental       enables experimental features (deprecated)
+ 
+ ${chalk.italic('Full documentation:')} ${chalk.underline('https://google.github.io/zx/')}
 `)
 }
 
-const argv = minimist(process.argv.slice(2), {
-  string: ['shell', 'prefix', 'postfix', 'eval'],
-  boolean: ['version', 'help', 'quiet', 'verbose', 'install', 'repl'],
+export const argv = minimist(process.argv.slice(2), {
+  string: ['shell', 'prefix', 'postfix', 'eval', 'cwd'],
+  boolean: [
+    'version',
+    'help',
+    'quiet',
+    'verbose',
+    'install',
+    'repl',
+    'experimental',
+  ],
   alias: { e: 'eval', i: 'install', v: 'version', h: 'help' },
   stopEarly: true,
 })
 
-await (async function main() {
-  const globals = './globals.js'
-  await import(globals)
+export async function main() {
+  await import('./globals.js')
+  if (argv.cwd) $.cwd = argv.cwd
   if (argv.verbose) $.verbose = true
-  if (argv.quiet) $.verbose = false
+  if (argv.quiet) $.quiet = true
   if (argv.shell) $.shell = argv.shell
   if (argv.prefix) $.prefix = argv.prefix
   if (argv.postfix) $.postfix = argv.postfix
@@ -86,7 +109,10 @@ await (async function main() {
   updateArgv(argv._.slice(firstArg === undefined ? 0 : 1))
   if (!firstArg || firstArg === '-') {
     const success = await scriptFromStdin()
-    if (!success) printUsage()
+    if (!success) {
+      printUsage()
+      process.exitCode = 1
+    }
     return
   }
   if (/^https?:/.test(firstArg)) {
@@ -95,23 +121,16 @@ await (async function main() {
   }
   const filepath = firstArg.startsWith('file:///')
     ? url.fileURLToPath(firstArg)
-    : resolve(firstArg)
+    : path.resolve(firstArg)
   await importPath(filepath)
-})().catch((err) => {
-  if (err instanceof ProcessOutput) {
-    console.error('Error:', err.message)
-  } else {
-    console.error(err)
-  }
-  process.exitCode = 1
-})
+}
 
-async function runScript(script: string) {
-  const filepath = join(process.cwd(), `zx-${randomId()}.mjs`)
+export async function runScript(script: string) {
+  const filepath = path.join($.cwd ?? process.cwd(), `zx-${randomId()}.mjs`)
   await writeAndImport(script, filepath)
 }
 
-async function scriptFromStdin() {
+export async function scriptFromStdin() {
   let script = ''
   if (!process.stdin.isTTY) {
     process.stdin.setEncoding('utf8')
@@ -127,7 +146,7 @@ async function scriptFromStdin() {
   return false
 }
 
-async function scriptFromHttp(remote: string) {
+export async function scriptFromHttp(remote: string) {
   const res = await fetch(remote)
   if (!res.ok) {
     console.error(`Error: Can't get ${remote}`)
@@ -135,13 +154,14 @@ async function scriptFromHttp(remote: string) {
   }
   const script = await res.text()
   const pathname = new URL(remote).pathname
-  const name = basename(pathname)
-  const ext = extname(pathname) || '.mjs'
-  const filepath = join(process.cwd(), `${name}-${randomId()}${ext}`)
+  const name = path.basename(pathname)
+  const ext = path.extname(pathname) || '.mjs'
+  const cwd = $.cwd ?? process.cwd()
+  const filepath = path.join(cwd, `${name}-${randomId()}${ext}`)
   await writeAndImport(script, filepath)
 }
 
-async function writeAndImport(
+export async function writeAndImport(
   script: string | Buffer,
   filepath: string,
   origin = filepath
@@ -154,39 +174,45 @@ async function writeAndImport(
   }
 }
 
-async function importPath(filepath: string, origin = filepath) {
-  const ext = extname(filepath)
+export async function importPath(filepath: string, origin = filepath) {
+  const ext = path.extname(filepath)
+  const base = path.basename(filepath)
+  const dir = path.dirname(filepath)
 
   if (ext === '') {
     const tmpFilename = fs.existsSync(`${filepath}.mjs`)
-      ? `${basename(filepath)}-${randomId()}.mjs`
-      : `${basename(filepath)}.mjs`
+      ? `${base}-${randomId()}.mjs`
+      : `${base}.mjs`
 
     return writeAndImport(
       await fs.readFile(filepath),
-      join(dirname(filepath), tmpFilename),
+      path.join(dir, tmpFilename),
       origin
     )
   }
   if (ext === '.md') {
     return writeAndImport(
       transformMarkdown(await fs.readFile(filepath)),
-      join(dirname(filepath), basename(filepath) + '.mjs'),
+      path.join(dir, base + '.mjs'),
       origin
     )
   }
   if (argv.install) {
     const deps = parseDeps(await fs.readFile(filepath))
-    await installDeps(deps, dirname(filepath))
+    await installDeps(deps, dir)
   }
-  const __filename = resolve(origin)
-  const __dirname = dirname(__filename)
-  const require = createRequire(origin)
-  Object.assign(global, { __filename, __dirname, require })
+  injectGlobalRequire(origin)
   await import(url.pathToFileURL(filepath).toString())
 }
 
-function transformMarkdown(buf: Buffer) {
+export function injectGlobalRequire(origin: string) {
+  const __filename = path.resolve(origin)
+  const __dirname = path.dirname(__filename)
+  const require = createRequire(origin)
+  Object.assign(globalThis, { __filename, __dirname, require })
+}
+
+export function transformMarkdown(buf: Buffer) {
   const source = buf.toString()
   const output = []
   let state = 'root'
@@ -195,7 +221,7 @@ function transformMarkdown(buf: Buffer) {
   const jsCodeBlock = /^(```+|~~~+)(js|javascript)$/
   const shCodeBlock = /^(```+|~~~+)(sh|bash)$/
   const otherCodeBlock = /^(```+|~~~+)(.*)$/
-  for (let line of source.split('\n')) {
+  for (let line of source.split(/\r?\n/)) {
     switch (state) {
       case 'root':
         if (/^( {4}|\t)/.test(line) && prevLineIsEmpty) {
@@ -257,6 +283,19 @@ function transformMarkdown(buf: Buffer) {
   return output.join('\n')
 }
 
-function getVersion(): string {
+export function getVersion(): string {
   return createRequire(import.meta.url)('../package.json').version
+}
+
+export function isMain(
+  metaurl = import.meta.url,
+  scriptpath = process.argv[1]
+) {
+  if (metaurl.startsWith('file:')) {
+    const modulePath = url.fileURLToPath(metaurl).replace(/\.\w+$/, '')
+    const mainPath = fs.realpathSync(scriptpath).replace(/\.\w+$/, '')
+    return mainPath === modulePath
+  }
+
+  return false
 }

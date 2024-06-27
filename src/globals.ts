@@ -14,7 +14,7 @@
 
 import * as _ from './index.js'
 
-Object.assign(global, _)
+Object.assign(globalThis, _)
 
 declare global {
   type ProcessPromise = _.ProcessPromise
@@ -26,6 +26,7 @@ declare global {
   var argv: typeof _.argv
   var cd: typeof _.cd
   var chalk: typeof _.chalk
+  var defaults: typeof _.defaults
   var echo: typeof _.echo
   var expBackoff: typeof _.expBackoff
   var fs: typeof _.fs
@@ -36,16 +37,24 @@ declare global {
   var nothrow: typeof _.nothrow
   var os: typeof _.os
   var path: typeof _.path
+  var ps: typeof _.ps
   var question: typeof _.question
   var quiet: typeof _.quiet
   var quote: typeof _.quote
   var quotePowerShell: typeof _.quotePowerShell
   var retry: typeof _.retry
-  var usePowerShell: typeof _.usePowerShell
-  var useBash: typeof _.useBash
   var sleep: typeof _.sleep
   var spinner: typeof _.spinner
   var stdin: typeof _.stdin
+  var syncProcessCwd: typeof _.syncProcessCwd
+  var tempdir: typeof _.tempdir
+  var tempfile: typeof _.tempfile
+  var tmpdir: typeof _.tempdir
+  var tmpfile: typeof _.tempfile
+  var updateArgv: typeof _.updateArgv
+  var usePowerShell: typeof _.usePowerShell
+  var usePwsh: typeof _.usePwsh
+  var useBash: typeof _.useBash
   var which: typeof _.which
   var within: typeof _.within
   var YAML: typeof _.YAML

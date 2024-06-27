@@ -19,11 +19,9 @@ import { type Duration, isString, parseDuration } from './util.js'
 import {
   chalk,
   minimist,
-  globbyModule,
-  GlobbyOptions,
   nodeFetch,
-  RequestInfo,
-  RequestInit,
+  type RequestInfo,
+  type RequestInit,
 } from './vendor.js'
 
 export { default as path } from 'node:path'
@@ -34,14 +32,6 @@ export function updateArgv(args: string[]) {
   argv = minimist(args)
   ;(global as any).argv = argv
 }
-
-export const globby = Object.assign(function globby(
-  patterns: string | readonly string[],
-  options?: GlobbyOptions
-) {
-  return globbyModule.globby(patterns, options)
-}, globbyModule) as (typeof globbyModule)['globby'] & typeof globbyModule
-export const glob = globby
 
 export function sleep(duration: Duration) {
   return new Promise((resolve) => {

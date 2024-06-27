@@ -1,4 +1,4 @@
-// Copyright 2022 Google LLC
+// Copyright 2024 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,17 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import assert from 'node:assert'
-import { expectType } from 'tsd'
-import 'zx/globals'
+export { exec, buildCmd, type TSpawnStore } from 'zurk/spawn'
 
-let p = $`cmd`
-assert(p instanceof ProcessPromise)
-expectType<ProcessPromise>(p)
+export type RequestInfo = Parameters<typeof globalThis.fetch>[0]
+export type RequestInit = Parameters<typeof globalThis.fetch>[1]
 
-let o = await p
-assert(o instanceof ProcessOutput)
-expectType<ProcessOutput>(o)
-
-expectType<string>(quote('foo'))
-expectType<string>(quotePowerShell('foo'))
+export { default as chalk, type ChalkInstance } from 'chalk'
+export { default as which } from 'which'
+export { default as ps } from '@webpod/ps'

@@ -12,7 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { chalk, parseLine } from './vendor.js'
+import os from 'node:os'
+import path from 'node:path'
+import fs from 'node:fs'
+import { chalk } from './vendor-core.js'
+
+export function tempdir(prefix = `zx-${randomId()}`) {
+  const dirpath = path.join(os.tmpdir(), prefix)
+  fs.mkdirSync(dirpath, { recursive: true })
+
+  return dirpath
+}
+
+export function tempfile(name?: string, data?: string | Buffer) {
+  const filepath = name
+    ? path.join(tempdir(), name)
+    : path.join(os.tmpdir(), `zx-${randomId()}`)
+
+  if (data === undefined) fs.closeSync(fs.openSync(filepath, 'w'))
+  else fs.writeFileSync(filepath, data)
+
+  return filepath
+}
 
 export function noop() {}
 
@@ -24,27 +45,46 @@ export function isString(obj: any) {
   return typeof obj === 'string'
 }
 
-export function normalizeMultilinePieces(
-  pieces: TemplateStringsArray
-): TemplateStringsArray {
-  return Object.assign(
-    pieces.map((p, i) =>
-      p.trim()
-        ? parseLine(p)
-            .words.map(({ w, e }) => {
-              if (w === '\\') return ''
-              return w.trim() + (p[e + 1] === ' ' ? ' ' : '')
-            })
-            .join(' ')
-        : pieces[i]
-    ),
-    { raw: pieces.raw }
-  )
+const pad = (v: string) => (v === ' ' ? ' ' : '')
+
+export function preferNmBin(
+  env: NodeJS.ProcessEnv,
+  ...dirs: (string | undefined)[]
+) {
+  const pathKey =
+    process.platform === 'win32'
+      ? Object.keys(env)
+          .reverse()
+          .find((key) => key.toUpperCase() === 'PATH') || 'Path'
+      : 'PATH'
+  const pathValue = dirs
+    .map((c) => c && path.resolve(c as string, 'node_modules', '.bin'))
+    .concat(env[pathKey])
+    .filter(Boolean)
+    .join(path.delimiter)
+
+  return {
+    ...env,
+    [pathKey]: pathValue,
+  }
 }
 
-export function noquote(): string {
-  throw new Error('No quote function is defined: https://ï.at/no-quote-func')
-}
+// export function normalizeMultilinePieces(
+//   pieces: TemplateStringsArray
+// ): TemplateStringsArray {
+//   return Object.assign(
+//     pieces.map((p, i) =>
+//       p.trim()
+//         ? pad(p[0]) +
+//           parseLine(p)
+//             .words.map(({ w }) => (w === '\\' ? '' : w.trim()))
+//             .join(' ') +
+//           pad(p[p.length - 1])
+//         : pieces[i]
+//     ),
+//     { raw: pieces.raw }
+//   )
+// }
 
 export function quote(arg: string) {
   if (/^[a-z0-9/_.\-@:=]+$/i.test(arg) || arg === '') {

@@ -22,6 +22,7 @@ import {
   cd,
   syncProcessCwd,
   usePowerShell,
+  usePwsh,
   useBash,
   kill,
   ProcessOutput,
@@ -50,6 +51,10 @@ import {
   expBackoff,
   spinner,
   path,
+  tempdir,
+  tempfile,
+  tmpdir,
+  tmpfile,
 } from '../build/index.js'
 
 describe('index', () => {
@@ -69,6 +74,7 @@ describe('index', () => {
     assert(defaults)
     assert(within)
     assert(usePowerShell)
+    assert(usePwsh)
     assert(useBash)
 
     // goods
@@ -94,9 +100,19 @@ describe('index', () => {
     assert(which)
     assert(YAML)
     assert(ps)
+    assert(ps.lookup)
+    assert(ps.lookup.sync)
+    assert(ps.lookupSync)
+    assert(ps.tree)
+    assert(ps.tree.sync)
+    assert(ps.treeSync)
 
     // utils
     assert(quote)
     assert(quotePowerShell)
+    assert(tempdir)
+    assert(tmpdir)
+    assert(tmpfile)
+    assert(tempfile)
   })
 })

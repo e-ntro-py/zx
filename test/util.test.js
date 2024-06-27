@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import assert from 'node:assert'
+import fs from 'node:fs'
 import { test, describe } from 'node:test'
 import {
   exitCodeInfo,
@@ -24,7 +25,11 @@ import {
   quote,
   quotePowerShell,
   randomId,
+  // normalizeMultilinePieces,
   getCallerLocationFromString,
+  tempdir,
+  tempfile,
+  preferNmBin,
 } from '../build/util.js'
 
 describe('util', () => {
@@ -92,6 +97,13 @@ describe('util', () => {
       "$ \u001b[93m$\u001b[39m\u001b[93m'\u001b[39m\u001b[93m\\\u001b[39m\u001b[93m'\u001b[39m\u001b[93m'\u001b[39m\n"
     )
   })
+
+  // test('normalizeMultilinePieces()', () => {
+  //   assert.equal(
+  //     normalizeMultilinePieces([' a ', 'b    c    d', ' e']).join(','),
+  //     ' a ,b c d, e'
+  //   )
+  // })
 })
 
 test('getCallerLocation: empty', () => {
@@ -139,4 +151,26 @@ test(`getCallerLocationFromString-JSC`, () => {
     d@/Users/user/test.js:11:5
   `
   assert.match(getCallerLocationFromString(stack), /^.*:11:5.*$/)
+})
+
+test('tempdir() creates temporary folders', () => {
+  assert.match(tempdir(), /\/zx-/)
+  assert.match(tempdir('foo'), /\/foo$/)
+})
+
+test('tempfile() creates temporary files', () => {
+  assert.match(tempfile(), /\/zx-.+/)
+  assert.match(tempfile('foo.txt'), /\/zx-.+\/foo\.txt$/)
+
+  const tf = tempfile('bar.txt', 'bar')
+  assert.match(tf, /\/zx-.+\/bar\.txt$/)
+  assert.equal(fs.readFileSync(tf, 'utf-8'), 'bar')
+})
+
+test('preferNmBin()', () => {
+  const env = {
+    PATH: '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/usr/local/sbin',
+  }
+  const _env = preferNmBin(env, process.cwd())
+  assert.equal(_env.PATH, `${process.cwd()}/node_modules/.bin:${env.PATH}`)
 })

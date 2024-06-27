@@ -14,7 +14,11 @@
 
 import assert from 'node:assert'
 import { test, describe, beforeEach } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import '../build/globals.js'
+import { isMain } from '../build/cli.js'
+
+const __filename = fileURLToPath(import.meta.url)
 
 describe('cli', () => {
   // Helps detect unresolved ProcessPromise.
@@ -45,11 +49,16 @@ describe('cli', () => {
     assert.match(help.stdout, /zx/)
   })
 
-  test('zx prints usage', async () => {
+  test('zx prints usage if no param passed', async () => {
     let p = $`node build/cli.js`
     p.stdin.end()
-    let out = await p
-    assert.match(out.stdout, /A tool for writing better scripts/)
+    try {
+      await p
+      assert.fail('must throw')
+    } catch (out) {
+      assert.match(out.stdout, /A tool for writing better scripts/)
+      assert.equal(out.exitCode, 1)
+    }
   })
 
   test('starts repl with --repl', async () => {
@@ -98,6 +107,14 @@ describe('cli', () => {
     assert.ok(p.stderr.includes(postfix))
   })
 
+  test('supports `--cwd` option ', async () => {
+    let cwd = path.resolve(fileURLToPath(import.meta.url), '../../temp')
+    fs.mkdirSync(cwd, { recursive: true })
+    let p =
+      await $`node build/cli.js --verbose --cwd=${cwd} <<< '$\`echo \${$.cwd}\`'`
+    assert.ok(p.stderr.endsWith(cwd + '\n'))
+  })
+
   test('scripts from https', async () => {
     $`cat ${path.resolve('test/fixtures/echo.http')} | nc -l 8080`
     let out =
@@ -140,6 +157,11 @@ describe('cli', () => {
 
   test('markdown scripts are working', async () => {
     await $`node build/cli.js test/fixtures/markdown.md`
+  })
+
+  test('markdown scripts are working for CRLF', async () => {
+    let p = await $`node build/cli.js test/fixtures/markdown-crlf.md`
+    assert.ok(p.stdout.includes('Hello, world!'))
   })
 
   test('exceptions are caught', async () => {
@@ -204,5 +226,29 @@ describe('cli', () => {
   test('exit code can be set', async () => {
     let p = await $`node build/cli.js test/fixtures/exit-code.mjs`.nothrow()
     assert.equal(p.exitCode, 42)
+  })
+
+  describe('internals', () => {
+    test('isMain() checks process entry point', () => {
+      assert.equal(isMain(import.meta.url, __filename), true)
+
+      assert.equal(
+        isMain(import.meta.url.replace('.js', '.cjs'), __filename),
+        true
+      )
+
+      try {
+        assert.equal(
+          isMain(
+            'file:///root/zx/test/cli.test.js',
+            '/root/zx/test/all.test.js'
+          ),
+          true
+        )
+        assert.throw()
+      } catch (e) {
+        assert.ok(['EACCES', 'ENOENT'].includes(e.code))
+      }
+    })
   })
 })
