@@ -20,6 +20,7 @@ import {
   errnoMessage,
   formatCmd,
   isString,
+  isStringLiteral,
   noop,
   parseDuration,
   quote,
@@ -29,7 +30,7 @@ import {
   getCallerLocationFromString,
   tempdir,
   tempfile,
-  preferNmBin,
+  preferLocalBin,
 } from '../build/util.js'
 
 describe('util', () => {
@@ -59,6 +60,17 @@ describe('util', () => {
     assert.ok(!isString(1))
   })
 
+  test('isStringLiteral()', () => {
+    const bar = 'baz'
+    assert.ok(isStringLiteral``)
+    assert.ok(isStringLiteral`foo`)
+    assert.ok(isStringLiteral`foo ${bar}`)
+
+    assert.ok(!isStringLiteral(''))
+    assert.ok(!isStringLiteral('foo'))
+    assert.ok(!isStringLiteral(['foo']))
+  })
+
   test('quote()', () => {
     assert.ok(quote('string') === 'string')
     assert.ok(quote(`'\f\n\r\t\v\0`) === `$'\\'\\f\\n\\r\\t\\v\\0'`)
@@ -74,6 +86,8 @@ describe('util', () => {
     assert.equal(parseDuration('2s'), 2000)
     assert.equal(parseDuration('500ms'), 500)
     assert.equal(parseDuration('2m'), 120000)
+    assert.throws(() => parseDuration('f2ms'))
+    assert.throws(() => parseDuration('2mss'))
     assert.throws(() => parseDuration('100'))
     assert.throws(() => parseDuration(NaN))
     assert.throws(() => parseDuration(-1))
@@ -167,10 +181,13 @@ test('tempfile() creates temporary files', () => {
   assert.equal(fs.readFileSync(tf, 'utf-8'), 'bar')
 })
 
-test('preferNmBin()', () => {
+test('preferLocalBin()', () => {
   const env = {
     PATH: '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/usr/local/sbin',
   }
-  const _env = preferNmBin(env, process.cwd())
-  assert.equal(_env.PATH, `${process.cwd()}/node_modules/.bin:${env.PATH}`)
+  const _env = preferLocalBin(env, process.cwd())
+  assert.equal(
+    _env.PATH,
+    `${process.cwd()}/node_modules/.bin:${process.cwd()}:${env.PATH}`
+  )
 })

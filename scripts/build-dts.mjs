@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import fs from 'fs/promises'
+import fs from 'node:fs/promises'
 import { generateDtsBundle } from 'dts-bundle-generator'
 import glob from 'fast-glob'
 
@@ -39,7 +39,7 @@ const entries = [
         'node-fetch-native',
         // 'chalk',
         'globby',
-        // '@types/minimist',
+        '@types/minimist',
         // '@types/which',
         // 'zurk',
         // '@webpod/ps',

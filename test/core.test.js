@@ -168,14 +168,22 @@ describe('core', () => {
     test('`$.sync()` provides synchronous API', () => {
       const o1 = $.sync`echo foo`
       const o2 = $({ sync: true })`echo foo`
+      const o3 = $.sync({})`echo foo`
       assert.equal(o1.stdout, 'foo\n')
       assert.equal(o2.stdout, 'foo\n')
+      assert.equal(o3.stdout, 'foo\n')
     })
 
     describe('$({opts}) API', () => {
       test('provides presets', async () => {
-        const $$ = $({ nothrow: true })
-        assert.equal((await $$`exit 1`).exitCode, 1)
+        const $1 = $({ nothrow: true })
+        assert.equal((await $1`exit 1`).exitCode, 1)
+
+        const $2 = $1({ sync: true })
+        assert.equal($2`exit 2`.exitCode, 2)
+
+        const $3 = $({ sync: true })({ nothrow: true })
+        assert.equal($3`exit 3`.exitCode, 3)
       })
 
       test('handles `input` option', async () => {
@@ -215,10 +223,22 @@ describe('core', () => {
       })
 
       test('`preferLocal` preserves env', async () => {
-        const path = await $({
-          preferLocal: true,
-        })`echo $PATH`
-        assert(path.stdout.startsWith(`${process.cwd()}/node_modules/.bin:`))
+        const cases = [
+          [true, `${process.cwd()}/node_modules/.bin:${process.cwd()}:`],
+          ['/foo', `/foo/node_modules/.bin:/foo:`],
+          [
+            ['/bar', '/baz'],
+            `/bar/node_modules/.bin:/bar:/baz/node_modules/.bin:/baz`,
+          ],
+        ]
+
+        for (const [preferLocal, expected] of cases) {
+          const path = await $({
+            preferLocal,
+            env: { PATH: process.env.PATH },
+          })`echo $PATH`
+          assert(path.stdout.startsWith(expected))
+        }
       })
 
       test('supports custom intermediate store', async () => {
@@ -278,6 +298,13 @@ describe('core', () => {
       assert.ok(o instanceof ProcessOutput)
     })
 
+    test('cmd() returns cmd to exec', () => {
+      const foo = '#bar'
+      const baz = 1
+      const p = $`echo ${foo} --t ${baz}`
+      assert.equal(p.cmd, "echo $'#bar' --t 1")
+    })
+
     test('stdio() works', async () => {
       let p = $`printf foo`
       await p
@@ -290,13 +317,6 @@ describe('core', () => {
     })
 
     describe('pipe() API', () => {
-      test('is chainable', async () => {
-        let { stdout } = await $`echo "hello"`
-          .pipe($`awk '{print $1" world"}'`)
-          .pipe($`tr '[a-z]' '[A-Z]'`)
-        assert.equal(stdout, 'HELLO WORLD\n')
-      })
-
       test('accepts Writable', async () => {
         let contents = ''
         let stream = new Writable({
@@ -328,6 +348,23 @@ describe('core', () => {
         }
       })
 
+      test('accepts ProcessPromise', async () => {
+        const p = await $`echo foo`.pipe($`cat`)
+        assert.equal(p.stdout.trim(), 'foo')
+      })
+
+      test('accepts $ template literal', async () => {
+        const p = await $`echo foo`.pipe`cat`
+        assert.equal(p.stdout.trim(), 'foo')
+      })
+
+      test('accepts stdout', async () => {
+        const p1 = $`echo pipe-to-stdout`
+        const p2 = p1.pipe(process.stdout)
+        assert.equal(p1, p2)
+        assert.equal((await p1).stdout.trim(), 'pipe-to-stdout')
+      })
+
       test('checks argument type', async () => {
         let err
         try {
@@ -339,6 +376,13 @@ describe('core', () => {
           err.message,
           'The pipe() method does not take strings. Forgot $?'
         )
+      })
+
+      test('is chainable', async () => {
+        let { stdout } = await $`echo "hello"`
+          .pipe($`awk '{print $1" world"}'`)
+          .pipe($`tr '[a-z]' '[A-Z]'`)
+        assert.equal(stdout, 'HELLO WORLD\n')
       })
 
       test('throws if already resolved', async (t) => {
@@ -355,6 +399,42 @@ describe('core', () => {
           )
         }
         assert.ok(ok, 'Expected failure!')
+      })
+
+      test('propagates rejection', async () => {
+        const p1 = $`exit 1`
+        const p2 = p1.pipe($`echo hello`)
+
+        try {
+          await p1
+        } catch (e) {
+          assert.equal(e.exitCode, 1)
+        }
+
+        try {
+          await p2
+        } catch (e) {
+          assert.equal(e.exitCode, 1)
+        }
+
+        const p3 = await $({ nothrow: true })`echo hello && exit 1`.pipe($`cat`)
+        assert.equal(p3.exitCode, 0)
+        assert.equal(p3.stdout.trim(), 'hello')
+
+        const p4 = $`exit 1`.pipe($`echo hello`)
+        try {
+          await p4
+        } catch (e) {
+          assert.equal(e.exitCode, 1)
+        }
+
+        const p5 = $`echo foo && exit 1`
+        const [r1, r2] = await Promise.allSettled([
+          p5.pipe($({ nothrow: true })`cat`),
+          p5.pipe($`cat`),
+        ])
+        assert.equal(r1.value.exitCode, 0)
+        assert.equal(r2.reason.exitCode, 1)
       })
     })
 
@@ -440,11 +520,13 @@ describe('core', () => {
 
     describe('kill()', () => {
       test('just works', async () => {
-        let p = $`sleep 999`.nothrow()
+        const p = $`sleep 999`.nothrow()
         setTimeout(() => {
           p.kill()
         }, 100)
-        await p
+        const o = await p
+        assert.equal(o.signal, 'SIGTERM')
+        assert.ok(o.duration >= 100 && o.duration < 1000)
       })
 
       test('a signal is passed with kill() method', async () => {
@@ -566,8 +648,12 @@ describe('core', () => {
     })
 
     test('lines()', async () => {
-      const p = $`echo 'foo\nbar\r\nbaz'`
-      assert.deepEqual(await p.lines(), ['foo', 'bar', 'baz'])
+      const p1 = $`echo 'foo\nbar\r\nbaz'`
+      assert.deepEqual(await p1.lines(), ['foo', 'bar', 'baz'])
+
+      const p2 = $.sync`echo 'foo\nbar\r\nbaz'`
+      console.log('p2', p2)
+      assert.deepEqual(p2.lines(), ['foo', 'bar', 'baz'])
     })
 
     test('buffer()', async () => {
@@ -584,6 +670,16 @@ describe('core', () => {
   })
 
   describe('ProcessOutput', () => {
+    test('getters', async () => {
+      const o = new ProcessOutput(-1, 'SIGTERM', '', '', 'foo\n', 'msg', 20)
+
+      assert.equal(o.stdout, '')
+      assert.equal(o.stderr, '')
+      assert.equal(o.signal, 'SIGTERM')
+      assert.equal(o.exitCode, -1)
+      assert.equal(o.duration, 20)
+    })
+
     test('toString()', async () => {
       const o = new ProcessOutput(null, null, '', '', 'foo\n')
       assert.equal(o.toString(), 'foo\n')
@@ -740,17 +836,22 @@ describe('core', () => {
       await promise
     })
 
-    test('restores previous cwd', async () => {
+    test('keeps the cwd ref for internal $ calls', async () => {
       let resolve, reject
       let promise = new Promise((...args) => ([resolve, reject] = args))
-
+      let cwd = process.cwd()
       let pwd = await $`pwd`
 
       within(async () => {
         cd('/tmp')
+        assert.ok(process.cwd().endsWith('/tmp'))
+        assert.ok((await $`pwd`).stdout.trim().endsWith('/tmp'))
+
         setTimeout(async () => {
+          process.chdir('/')
           assert.ok((await $`pwd`).stdout.trim().endsWith('/tmp'))
           resolve()
+          process.chdir(cwd)
         }, 1000)
       })
 
